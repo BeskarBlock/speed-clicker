@@ -1,31 +1,26 @@
 'use server'
 
-import { createClient } from '@vercel/kv'
+import Redis from 'ioredis'
 import { revalidatePath } from 'next/cache'
 
-// Tady definujeme typ skóre
 export type Score = {
   name: string
   value: number
   timestamp: number
 }
 
-// ⚠️ MANUÁLNÍ PŘIPOJENÍ
-// Tohle je bezpečnější než "import { kv }", protože vidíme, co se děje.
-// Pokud nemáš nastavené proměnné, použijeme prázdný string, aby to hned nespadlo,
-// ale vyhodí to chybu až při pokusu o uložení.
-const kv = createClient({
-  url: process.env.KV_REST_API_URL || process.env.KV_URL || '',
-  token: process.env.KV_REST_API_TOKEN || process.env.KV_TOKEN || '',
-})
+// Funkce pro získání klienta. 
+// Pokud nemáme URL (např. při buildování), nezkoušíme se připojit, aby to nespadlo.
+const getRedis = () => {
+  if (process.env.REDIS_URL) {
+    return new Redis(process.env.REDIS_URL)
+  }
+  return null
+}
 
 export async function saveScore(name: string, score: number) {
-  // Debugging: Vypíše do logů na Vercelu, jestli vidí databázi
-  console.log('Pokus o uložení. URL databáze:', process.env.KV_REST_API_URL ? 'Nalezena' : 'CHYBÍ!')
-
-  if (!process.env.KV_REST_API_URL && !process.env.KV_URL) {
-    return { error: 'Chyba serveru: Databáze není připojena (chybí URL).' }
-  }
+  const redis = getRedis()
+  if (!redis) return { error: 'Chybí REDIS_URL' }
 
   if (!name || name.length > 15) return { error: 'Jméno je moc dlouhé nebo chybí' }
   
@@ -36,24 +31,29 @@ export async function saveScore(name: string, score: number) {
   }
 
   try {
-    await kv.zadd('leaderboard', { score: score, member: JSON.stringify(entry) })
+    // ioredis syntaxe: zadd(key, score, value)
+    await redis.zadd('leaderboard', score, JSON.stringify(entry))
     revalidatePath('/')
     return { success: true }
   } catch (err) {
-    console.error('Chyba při zápisu do KV:', err)
-    return { error: 'Nepodařilo se uložit skóre.' }
+    console.error('Chyba Redis:', err)
+    return { error: 'Chyba při ukládání' }
   }
 }
 
 export async function getTopScores() {
+  const redis = getRedis()
+  if (!redis) return []
+
   try {
-    if (!process.env.KV_REST_API_URL && !process.env.KV_URL) return []
+    // Získáme top 10 skóre (od nejvyššího)
+    const rawScores = await redis.zrange('leaderboard', 0, 9, 'REV')
     
-    const rawScores = await kv.zrange('leaderboard', 0, 9, { rev: true })
-    const scores = rawScores.map((s) => (typeof s === 'string' ? JSON.parse(s) : s)) as Score[]
+    // Převedeme JSON stringy zpět na objekty
+    const scores = rawScores.map((s) => JSON.parse(s)) as Score[]
     return scores
   } catch (error) {
-    console.error('Chyba při načítání:', error)
+    console.error('Chyba Redis:', error)
     return []
   }
 }
